@@ -37,7 +37,7 @@ int cliSecureConnection(redisContext *c, cliSSLconfig config, const char **err);
 
 ssize_t cliWriteConn(redisContext *c, const char *buf, size_t buf_len);
 
-int cliSecureInit();
+int cliSecureInit(void);
 
 sds readArgFromStdin(void);
 
@@ -48,4 +48,12 @@ sds unquoteCString(char *str);
 void parseRedisUri(const char *uri, const char* tool_name, cliConnInfo *connInfo, int *tls_flag);
 
 void freeCliConnInfo(cliConnInfo connInfo);
+
+sds escapeJsonString(sds s, const char *p, size_t len);
+
+sds cliVersion(void);
+
+redisContext *redisConnectWrapper(const char *ip, int port, const struct timeval tv);
+redisContext *redisConnectUnixWrapper(const char *path, const struct timeval tv);
+
 #endif /* __CLICOMMON_H */

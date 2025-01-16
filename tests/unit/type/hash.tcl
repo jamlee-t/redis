@@ -1,4 +1,7 @@
 start_server {tags {"hash"}} {
+    r config set hash-max-listpack-value 64
+    r config set hash-max-listpack-entries 512
+
     test {HSET/HLEN - Small hash creation} {
         array set smallhash {}
         for {set i 0} {$i < 8} {incr i} {
@@ -41,7 +44,7 @@ start_server {tags {"hash"}} {
         assert_encoding $type myhash
 
         # coverage for objectComputeSize
-        assert_morethan [r memory usage myhash] 0
+        assert_morethan [memory_usage myhash] 0
 
         test "HRANDFIELD - $type" {
             unset -nocomplain myhash
@@ -71,6 +74,13 @@ start_server {tags {"hash"}} {
         r hrandfield myhash 0
     } {}
 
+    test "HRANDFIELD count overflow" {
+        r hmset myhash a 1
+        assert_error {*value is out of range*} {r hrandfield myhash -9223372036854770000 withvalues}
+        assert_error {*value is out of range*} {r hrandfield myhash -9223372036854775808 withvalues}
+        assert_error {*value is out of range*} {r hrandfield myhash -9223372036854775808}
+    } {}
+
     test "HRANDFIELD with <count> against non existing key" {
         r hrandfield nonexisting_key 100
     } {}
@@ -98,10 +108,7 @@ start_server {tags {"hash"}} {
             assert_encoding $type myhash
 
             # create a dict for easy lookup
-            unset -nocomplain mydict
-            foreach {k v} [r hgetall myhash] {
-                dict append mydict $k $v
-            }
+            set mydict [dict create {*}[r hgetall myhash]]
 
             # We'll stress different parts of the code, see the implementation
             # of HRANDFIELD for more information, but basically there are
@@ -313,10 +320,10 @@ start_server {tags {"hash"}} {
         set _ $result
     } {foo}
 
-    test {HMSET wrong number of args} {
-        catch {r hmset smallhash key1 val1 key2} err
-        format $err
-    } {*wrong number*}
+    test {HSET/HMSET wrong number of args} {
+        assert_error {*wrong number of arguments for 'hset' command} {r hset smallhash key1 val1 key2}
+        assert_error {*wrong number of arguments for 'hmset' command} {r hmset smallhash key1 val1 key2}
+    }
 
     test {HMSET - small hash} {
         set args {}
@@ -346,9 +353,24 @@ start_server {tags {"hash"}} {
         set _ $rv
     } {{{} {}} {{} {}} {{} {}}}
 
-    test {HMGET against wrong type} {
+    test {Hash commands against wrong type} {
         r set wrongtype somevalue
-        assert_error "*wrong*" {r hmget wrongtype field1 field2}
+        assert_error "WRONGTYPE Operation against a key*" {r hmget wrongtype field1 field2}
+        assert_error "WRONGTYPE Operation against a key*" {r hrandfield wrongtype}
+        assert_error "WRONGTYPE Operation against a key*" {r hget wrongtype field1}
+        assert_error "WRONGTYPE Operation against a key*" {r hgetall wrongtype}
+        assert_error "WRONGTYPE Operation against a key*" {r hdel wrongtype field1}
+        assert_error "WRONGTYPE Operation against a key*" {r hincrby wrongtype field1 2}
+        assert_error "WRONGTYPE Operation against a key*" {r hincrbyfloat wrongtype field1 2.5}
+        assert_error "WRONGTYPE Operation against a key*" {r hstrlen wrongtype field1}
+        assert_error "WRONGTYPE Operation against a key*" {r hvals wrongtype}
+        assert_error "WRONGTYPE Operation against a key*" {r hkeys wrongtype}
+        assert_error "WRONGTYPE Operation against a key*" {r hexists wrongtype field1}
+        assert_error "WRONGTYPE Operation against a key*" {r hset wrongtype field1 val1}
+        assert_error "WRONGTYPE Operation against a key*" {r hmset wrongtype field1 val1 field2 val2}
+        assert_error "WRONGTYPE Operation against a key*" {r hsetnx wrongtype field1 val1}
+        assert_error "WRONGTYPE Operation against a key*" {r hlen wrongtype}
+        assert_error "WRONGTYPE Operation against a key*" {r hscan wrongtype 0}
     }
 
     test {HMGET - small hash} {
@@ -415,6 +437,11 @@ start_server {tags {"hash"}} {
         lsort [r hgetall bighash]
     } [lsort [array get bighash]]
 
+    test {HGETALL against non-existing key} {
+        r del htest
+        r hgetall htest
+    } {}
+
     test {HDEL and return value} {
         set rv {}
         lappend rv [r hdel smallhash nokey]
@@ -468,6 +495,13 @@ start_server {tags {"hash"}} {
         list [r hincrby htest foo 2]
     } {2}
 
+    test {HINCRBY HINCRBYFLOAT against non-integer increment value} {
+        r del incrhash
+        r hset incrhash field 5
+        assert_error "*value is not an integer*" {r hincrby incrhash field v}
+        assert_error "*value is not a*" {r hincrbyfloat incrhash field v}
+    }
+
     test {HINCRBY against non existing hash key} {
         set rv {}
         r hdel smallhash tmp
@@ -510,8 +544,8 @@ start_server {tags {"hash"}} {
         catch {r hincrby smallhash str 1} smallerr
         catch {r hincrby bighash str 1} bigerr
         set rv {}
-        lappend rv [string match "ERR*not an integer*" $smallerr]
-        lappend rv [string match "ERR*not an integer*" $bigerr]
+        lappend rv [string match "ERR *not an integer*" $smallerr]
+        lappend rv [string match "ERR *not an integer*" $bigerr]
     } {1 1}
 
     test {HINCRBY fails against hash value with spaces (right)} {
@@ -520,8 +554,8 @@ start_server {tags {"hash"}} {
         catch {r hincrby smallhash str 1} smallerr
         catch {r hincrby bighash str 1} bigerr
         set rv {}
-        lappend rv [string match "ERR*not an integer*" $smallerr]
-        lappend rv [string match "ERR*not an integer*" $bigerr]
+        lappend rv [string match "ERR *not an integer*" $smallerr]
+        lappend rv [string match "ERR *not an integer*" $bigerr]
     } {1 1}
 
     test {HINCRBY can detect overflows} {
@@ -582,8 +616,8 @@ start_server {tags {"hash"}} {
         catch {r hincrbyfloat smallhash str 1} smallerr
         catch {r hincrbyfloat bighash str 1} bigerr
         set rv {}
-        lappend rv [string match "ERR*not*float*" $smallerr]
-        lappend rv [string match "ERR*not*float*" $bigerr]
+        lappend rv [string match "ERR *not*float*" $smallerr]
+        lappend rv [string match "ERR *not*float*" $bigerr]
     } {1 1}
 
     test {HINCRBYFLOAT fails against hash value with spaces (right)} {
@@ -592,15 +626,15 @@ start_server {tags {"hash"}} {
         catch {r hincrbyfloat smallhash str 1} smallerr
         catch {r hincrbyfloat bighash str 1} bigerr
         set rv {}
-        lappend rv [string match "ERR*not*float*" $smallerr]
-        lappend rv [string match "ERR*not*float*" $bigerr]
+        lappend rv [string match "ERR *not*float*" $smallerr]
+        lappend rv [string match "ERR *not*float*" $bigerr]
     } {1 1}
 
     test {HINCRBYFLOAT fails against hash value that contains a null-terminator in the middle} {
         r hset h f "1\x002"
         catch {r hincrbyfloat h f 1} err
         set rv {}
-        lappend rv [string match "ERR*not*float*" $err]
+        lappend rv [string match "ERR *not*float*" $err]
     } {1}
 
     test {HSTRLEN against the small hash} {
@@ -649,6 +683,31 @@ start_server {tags {"hash"}} {
             assert {$len1 == $len2}
             assert {$len2 == $len3}
         }
+    }
+
+    test {HINCRBYFLOAT over hash-max-listpack-value encoded with a listpack} {
+        set original_max_value [lindex [r config get hash-max-ziplist-value] 1]
+        r config set hash-max-listpack-value 8
+        
+        # hash's value exceeds hash-max-listpack-value
+        r del smallhash
+        r del bighash
+        r hset smallhash tmp 0
+        r hset bighash tmp 0
+        r hincrbyfloat smallhash tmp 0.000005
+        r hincrbyfloat bighash tmp 0.0000005
+        assert_encoding listpack smallhash
+        assert_encoding hashtable bighash
+
+        # hash's field exceeds hash-max-listpack-value
+        r del smallhash
+        r del bighash
+        r hincrbyfloat smallhash abcdefgh 1
+        r hincrbyfloat bighash abcdefghi 1
+        assert_encoding listpack smallhash
+        assert_encoding hashtable bighash
+
+        r config set hash-max-listpack-value $original_max_value
     }
 
     test {Hash ziplist regression test for large keys} {
@@ -797,4 +856,11 @@ start_server {tags {"hash"}} {
         set _ $k
     } {ZIP_INT_8B 127 ZIP_INT_16B 32767 ZIP_INT_32B 2147483647 ZIP_INT_64B 9223372036854775808 ZIP_INT_IMM_MIN 0 ZIP_INT_IMM_MAX 12}
 
+    # On some platforms strtold("+inf") with valgrind returns a non-inf result
+    if {!$::valgrind} {
+        test {HINCRBYFLOAT does not allow NaN or Infinity} {
+            assert_error "*value is NaN or Infinity*" {r hincrbyfloat hfoo field +inf}
+            assert_equal 0 [r exists hfoo]
+        }
+    }
 }

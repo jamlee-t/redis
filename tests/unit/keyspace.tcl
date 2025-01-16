@@ -34,6 +34,14 @@ start_server {tags {"keyspace"}} {
         r dbsize
     } {6}
 
+    test {KEYS with hashtag} {
+        foreach key {"{a}x" "{a}y" "{a}z" "{b}a" "{b}b" "{b}c"} {
+            r set $key hello
+        }
+        assert_equal [lsort [r keys "{a}*"]] [list "{a}x" "{a}y" "{a}z"]
+        assert_equal [lsort [r keys "*{b}*"]] [list "{b}a" "{b}b" "{b}c"]
+    } 
+
     test {DEL all keys} {
         foreach key [r keys *] {r del $key}
         r dbsize
@@ -244,42 +252,46 @@ start_server {tags {"keyspace"}} {
         assert {[r get mynewkey{t}] eq "foobar"}
     }
 
-    test {COPY basic usage for list} {
+array set largevalue [generate_largevalue_test_array]
+foreach {type large} [array get largevalue] {
+    set origin_config [config_get_set list-max-listpack-size -1]
+    test "COPY basic usage for list - $type" {
         r del mylist{t} mynewlist{t}
-        r lpush mylist{t} a b c d
+        r lpush mylist{t} a b $large c d
+        assert_encoding $type mylist{t}
         r copy mylist{t} mynewlist{t}
+        assert_encoding $type mynewlist{t}
         set digest [debug_digest_value mylist{t}]
         assert_equal $digest [debug_digest_value mynewlist{t}]
-        assert_equal 1 [r object refcount mylist{t}]
-        assert_equal 1 [r object refcount mynewlist{t}]
+        assert_refcount 1 mylist{t}
+        assert_refcount 1 mynewlist{t}
         r del mylist{t}
         assert_equal $digest [debug_digest_value mynewlist{t}]
     }
+    config_set list-max-listpack-size $origin_config
+}
 
-    test {COPY basic usage for intset set} {
-        r del set1{t} newset1{t}
-        r sadd set1{t} 1 2 3
-        assert_encoding intset set1{t}
-        r copy set1{t} newset1{t}
-        set digest [debug_digest_value set1{t}]
-        assert_equal $digest [debug_digest_value newset1{t}]
-        assert_equal 1 [r object refcount set1{t}]
-        assert_equal 1 [r object refcount newset1{t}]
-        r del set1{t}
-        assert_equal $digest [debug_digest_value newset1{t}]
-    }
-
-    test {COPY basic usage for hashtable set} {
-        r del set2{t} newset2{t}
-        r sadd set2{t} 1 2 3 a
-        assert_encoding hashtable set2{t}
-        r copy set2{t} newset2{t}
-        set digest [debug_digest_value set2{t}]
-        assert_equal $digest [debug_digest_value newset2{t}]
-        assert_equal 1 [r object refcount set2{t}]
-        assert_equal 1 [r object refcount newset2{t}]
-        r del set2{t}
-        assert_equal $digest [debug_digest_value newset2{t}]
+    foreach type {intset listpack hashtable} {
+        test {COPY basic usage for $type set} {
+            r del set1{t} newset1{t}
+            r sadd set1{t} 1 2 3
+            if {$type ne "intset"} {
+                r sadd set1{t} a
+            }
+            if {$type eq "hashtable"} {
+                for {set i 4} {$i < 200} {incr i} {
+                    r sadd set1{t} $i
+                }
+            }
+            assert_encoding $type set1{t}
+            r copy set1{t} newset1{t}
+            set digest [debug_digest_value set1{t}]
+            assert_equal $digest [debug_digest_value newset1{t}]
+            assert_refcount 1 set1{t}
+            assert_refcount 1 newset1{t}
+            r del set1{t}
+            assert_equal $digest [debug_digest_value newset1{t}]
+        }
     }
 
     test {COPY basic usage for listpack sorted set} {
@@ -289,8 +301,8 @@ start_server {tags {"keyspace"}} {
         r copy zset1{t} newzset1{t}
         set digest [debug_digest_value zset1{t}]
         assert_equal $digest [debug_digest_value newzset1{t}]
-        assert_equal 1 [r object refcount zset1{t}]
-        assert_equal 1 [r object refcount newzset1{t}]
+        assert_refcount 1 zset1{t}
+        assert_refcount 1 newzset1{t}
         r del zset1{t}
         assert_equal $digest [debug_digest_value newzset1{t}]
     }
@@ -306,22 +318,23 @@ start_server {tags {"keyspace"}} {
         r copy zset2{t} newzset2{t}
         set digest [debug_digest_value zset2{t}]
         assert_equal $digest [debug_digest_value newzset2{t}]
-        assert_equal 1 [r object refcount zset2{t}]
-        assert_equal 1 [r object refcount newzset2{t}]
+        assert_refcount 1 zset2{t}
+        assert_refcount 1 newzset2{t}
         r del zset2{t}
         assert_equal $digest [debug_digest_value newzset2{t}]
         r config set zset-max-ziplist-entries $original_max
     }
 
     test {COPY basic usage for listpack hash} {
+        r config set hash-max-listpack-entries 512
         r del hash1{t} newhash1{t}
         r hset hash1{t} tmp 17179869184
         assert_encoding listpack hash1{t}
         r copy hash1{t} newhash1{t}
         set digest [debug_digest_value hash1{t}]
         assert_equal $digest [debug_digest_value newhash1{t}]
-        assert_equal 1 [r object refcount hash1{t}]
-        assert_equal 1 [r object refcount newhash1{t}]
+        assert_refcount 1 hash1{t}
+        assert_refcount 1 newhash1{t}
         r del hash1{t}
         assert_equal $digest [debug_digest_value newhash1{t}]
     }
@@ -337,8 +350,8 @@ start_server {tags {"keyspace"}} {
         r copy hash2{t} newhash2{t}
         set digest [debug_digest_value hash2{t}]
         assert_equal $digest [debug_digest_value newhash2{t}]
-        assert_equal 1 [r object refcount hash2{t}]
-        assert_equal 1 [r object refcount newhash2{t}]
+        assert_refcount 1 hash2{t}
+        assert_refcount 1 newhash2{t}
         r del hash2{t}
         assert_equal $digest [debug_digest_value newhash2{t}]
         r config set hash-max-ziplist-entries $original_max
@@ -352,8 +365,8 @@ start_server {tags {"keyspace"}} {
         r copy mystream{t} mynewstream{t}
         set digest [debug_digest_value mystream{t}]
         assert_equal $digest [debug_digest_value mynewstream{t}]
-        assert_equal 1 [r object refcount mystream{t}]
-        assert_equal 1 [r object refcount mynewstream{t}]
+        assert_refcount 1 mystream{t}
+        assert_refcount 1 mynewstream{t}
         r del mystream{t}
         assert_equal $digest [debug_digest_value mynewstream{t}]
     }
@@ -379,8 +392,8 @@ start_server {tags {"keyspace"}} {
         r copy x{t} newx{t}
         set info [r xinfo stream x{t} full]
         assert_equal $info [r xinfo stream newx{t} full]
-        assert_equal 1 [r object refcount x{t}]
-        assert_equal 1 [r object refcount newx{t}]
+        assert_refcount 1 x{t}
+        assert_refcount 1 newx{t}
         r del x{t}
         assert_equal $info [r xinfo stream newx{t} full]
         r flushdb
@@ -489,4 +502,56 @@ start_server {tags {"keyspace"}} {
         r keys *
         r keys *
     } {dlskeriewrioeuwqoirueioqwrueoqwrueqw}
+
+    test {Regression for pattern matching long nested loops} {
+        r flushdb
+        r SET aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1
+        r KEYS "a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b"
+    } {}
+
+    test {Regression for pattern matching very long nested loops} {
+        r flushdb
+        r SET [string repeat "a" 50000] 1
+        r KEYS [string repeat "*?" 50000]
+    } {}
+
+    test {Coverage: basic SWAPDB test and unhappy path} {
+       r flushall
+       r select 0
+       r set swapkey v1
+       r select 1
+       assert_match 0 [r dbsize] ;#verify DB[1] has 0 keys
+       r swapdb 0 1
+       assert_match 1 [r dbsize]
+       r select 0
+       assert_match 0 [r dbsize] ;#verify DB[0] has 0 keys
+       r flushall
+       assert_error "ERR DB index is out of range*" {r swapdb 44 55}
+       assert_error "ERR invalid second DB index*" {r swapdb 44 a}
+       assert_error "ERR invalid first DB index*" {r swapdb a 55}
+       assert_error "ERR invalid first DB index*" {r swapdb a b}
+       assert_match "OK" [r swapdb 0 0]
+    } {} {singledb:skip}
+
+    test {Coverage: SWAPDB and FLUSHDB} {
+       # set a key in each db and swapdb one of 2 with different db
+       # and flushdb on swapped db.
+       r flushall
+       r select 0
+       r set swapkey v1
+       r select 1
+       r set swapkey1 v1
+       assert_no_match "*db2:keys=*" [r info keyspace]
+       r swapdb 0 2
+       r select 0
+       assert_match 0 [r dbsize]
+       assert_no_match "*db0:keys=*" [r info keyspace]
+       r select 2
+       r flushdb
+       assert_match 0 [r dbsize]
+       assert_match "*db1:keys=*" [r info keyspace]
+       assert_no_match "*db0:keys=*" [r info keyspace]
+       assert_no_match "*db2:keys=*" [r info keyspace]
+       r flushall
+    } {OK} {singledb:skip}
 }

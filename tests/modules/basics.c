@@ -2,35 +2,13 @@
  *
  * -----------------------------------------------------------------------------
  *
- * Copyright (c) 2016, Salvatore Sanfilippo <antirez at gmail dot com>
+ * Copyright (c) 2016-Present, Redis Ltd.
  * All rights reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * Licensed under your choice of the Redis Source Available License 2.0
+ * (RSALv2) or the Server Side Public License v1 (SSPLv1).
  */
 
-#define REDISMODULE_EXPERIMENTAL_API
 #include "redismodule.h"
 #include <string.h>
 #include <stdlib.h>
@@ -284,8 +262,8 @@ int TestCallResp3Double(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     double d = RedisModule_CallReplyDouble(reply);
     /* we compare strings, since comparing doubles directly can fail in various architectures, e.g. 32bit */
     char got[30], expected[30];
-    sprintf(got, "%.17g", d);
-    sprintf(expected, "%.17g", 3.14159265359);
+    snprintf(got, sizeof(got), "%.17g", d);
+    snprintf(expected, sizeof(expected), "%.17g", 3.141);
     if (strcmp(got, expected) != 0) goto fail;
     RedisModule_ReplyWithSimpleString(ctx,"OK");
     return REDISMODULE_OK;
@@ -401,8 +379,40 @@ int TestStringAppendAM(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     RedisModule_AutoMemory(ctx);
     RedisModuleString *s = RedisModule_CreateString(ctx,"foo",3);
     RedisModule_RetainString(ctx,s);
+    RedisModule_TrimStringAllocation(s);    /* Mostly NOP, but exercises the API function */
     RedisModule_StringAppendBuffer(ctx,s,"bar",3);
     RedisModule_ReplyWithString(ctx,s);
+    RedisModule_FreeString(ctx,s);
+    return REDISMODULE_OK;
+}
+
+/* TEST.STRING.TRIM -- Test we trim a string with free space. */
+int TestTrimString(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+    RedisModuleString *s = RedisModule_CreateString(ctx,"foo",3);
+    char *tmp = RedisModule_Alloc(1024);
+    RedisModule_StringAppendBuffer(ctx,s,tmp,1024);
+    size_t string_len = RedisModule_MallocSizeString(s);
+    RedisModule_TrimStringAllocation(s);
+    size_t len_after_trim = RedisModule_MallocSizeString(s);
+
+    /* Determine if using jemalloc memory allocator. */
+    RedisModuleServerInfoData *info = RedisModule_GetServerInfo(ctx, "memory");
+    const char *field = RedisModule_ServerInfoGetFieldC(info, "mem_allocator");
+    int use_jemalloc = !strncmp(field, "jemalloc", 8);
+
+    /* Jemalloc will reallocate `s` from 2k to 1k after RedisModule_TrimStringAllocation(),
+     * but non-jemalloc memory allocators may keep the old size. */
+    if ((use_jemalloc && len_after_trim < string_len) ||
+        (!use_jemalloc && len_after_trim <= string_len))
+    {
+        RedisModule_ReplyWithSimpleString(ctx, "OK");
+    } else {
+        RedisModule_ReplyWithError(ctx, "String was not trimmed as expected.");
+    }
+    RedisModule_FreeServerInfo(ctx, info);
+    RedisModule_Free(tmp);
     RedisModule_FreeString(ctx,s);
     return REDISMODULE_OK;
 }
@@ -718,6 +728,25 @@ end:
 
 /* Return 1 if the reply matches the specified string, otherwise log errors
  * in the server log and return 0. */
+int TestAssertErrorReply(RedisModuleCtx *ctx, RedisModuleCallReply *reply, char *str, size_t len) {
+    RedisModuleString *mystr, *expected;
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_ERROR) {
+        return 0;
+    }
+
+    mystr = RedisModule_CreateStringFromCallReply(reply);
+    expected = RedisModule_CreateString(ctx,str,len);
+    if (RedisModule_StringCompare(mystr,expected) != 0) {
+        const char *mystr_ptr = RedisModule_StringPtrLen(mystr,NULL);
+        const char *expected_ptr = RedisModule_StringPtrLen(expected,NULL);
+        RedisModule_Log(ctx,"warning",
+            "Unexpected Error reply reply '%s' (instead of '%s')",
+            mystr_ptr, expected_ptr);
+        return 0;
+    }
+    return 1;
+}
+
 int TestAssertStringReply(RedisModuleCtx *ctx, RedisModuleCallReply *reply, char *str, size_t len) {
     RedisModuleString *mystr, *expected;
 
@@ -833,6 +862,9 @@ int TestBasics(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 
     T("test.string.append.am","");
     if (!TestAssertStringReply(ctx,reply,"foobar",6)) goto fail;
+    
+    T("test.string.trim","");
+    if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
 
     T("test.string.printf", "cc", "foo", "bar");
     if (!TestAssertStringReply(ctx,reply,"Got 3 args. argv[1]: foo, argv[2]: bar",38)) goto fail;
@@ -845,6 +877,18 @@ int TestBasics(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     if (RedisModule_CallReplyLength(reply) != 2) goto fail;
     if (!TestAssertStringReply(ctx,RedisModule_CallReplyArrayElement(reply, 0),"test",4)) goto fail;
     if (!TestAssertStringReply(ctx,RedisModule_CallReplyArrayElement(reply, 1),"1234",4)) goto fail;
+
+    T("foo", "E");
+    if (!TestAssertErrorReply(ctx,reply,"ERR unknown command 'foo', with args beginning with: ",53)) goto fail;
+
+    T("set", "Ec", "x");
+    if (!TestAssertErrorReply(ctx,reply,"ERR wrong number of arguments for 'set' command",47)) goto fail;
+
+    T("shutdown", "SE");
+    if (!TestAssertErrorReply(ctx,reply,"ERR command 'shutdown' is not allowed on script mode",52)) goto fail;
+
+    T("set", "WEcc", "x", "1");
+    if (!TestAssertErrorReply(ctx,reply,"ERR Write command 'set' was called while write is not allowed.",62)) goto fail;
 
     RedisModule_ReplyWithSimpleString(ctx,"ALL TESTS PASSED");
     return REDISMODULE_OK;
@@ -861,6 +905,28 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
 
     if (RedisModule_Init(ctx,"test",1,REDISMODULE_APIVER_1)
         == REDISMODULE_ERR) return REDISMODULE_ERR;
+
+    /* Perform RM_Call inside the RedisModule_OnLoad
+     * to verify that it works as expected without crashing.
+     * The tests will verify it on different configurations
+     * options (cluster/no cluster). A simple ping command
+     * is enough for this test. */
+    RedisModuleCallReply *reply = RedisModule_Call(ctx, "ping", "");
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_STRING) {
+        RedisModule_FreeCallReply(reply);
+        return REDISMODULE_ERR;
+    }
+    size_t len;
+    const char *reply_str = RedisModule_CallReplyStringPtr(reply, &len);
+    if (len != 4) {
+        RedisModule_FreeCallReply(reply);
+        return REDISMODULE_ERR;
+    }
+    if (memcmp(reply_str, "PONG", 4) != 0) {
+        RedisModule_FreeCallReply(reply);
+        return REDISMODULE_ERR;
+    }
+    RedisModule_FreeCallReply(reply);
 
     if (RedisModule_CreateCommand(ctx,"test.call",
         TestCall,"write deny-oom",1,1,1) == REDISMODULE_ERR)
@@ -910,6 +976,10 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         TestStringAppend,"write deny-oom",1,1,1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
+    if (RedisModule_CreateCommand(ctx,"test.string.trim",
+        TestTrimString,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
     if (RedisModule_CreateCommand(ctx,"test.string.append.am",
         TestStringAppendAM,"write deny-oom",1,1,1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
@@ -935,12 +1005,12 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         return REDISMODULE_ERR;
 
     if (RedisModule_CreateCommand(ctx,"test.basics",
-        TestBasics,"readonly",1,1,1) == REDISMODULE_ERR)
+        TestBasics,"write",1,1,1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
     /* the following commands are used by an external test and should not be added to TestBasics */
     if (RedisModule_CreateCommand(ctx,"test.rmcallautomode",
-        TestCallRespAutoMode,"readonly",1,1,1) == REDISMODULE_ERR)
+        TestCallRespAutoMode,"write",1,1,1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
     if (RedisModule_CreateCommand(ctx,"test.getresp",

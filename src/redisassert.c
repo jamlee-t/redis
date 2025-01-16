@@ -6,7 +6,7 @@
  *
  * ----------------------------------------------------------------------------
  *
- * Copyright (c) 2021, Andy Pan <panjf2000@gmail.com> and Redis Labs
+ * Copyright (c) 2021, Andy Pan <panjf2000@gmail.com> and Redis Ltd.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -35,18 +35,27 @@
  */
 
 
+#include <stdarg.h>
 #include <stdio.h> 
 #include <stdlib.h>
+#include <signal.h>
 
 void _serverAssert(const char *estr, const char *file, int line) {
     fprintf(stderr, "=== ASSERTION FAILED ===");
     fprintf(stderr, "==> %s:%d '%s' is not true",file,line,estr);
-    *((char*)-1) = 'x';
+    raise(SIGSEGV);
 }
 
 void _serverPanic(const char *file, int line, const char *msg, ...) {
+    va_list ap;
+    char fmtmsg[256];
+
+    va_start(ap,msg);
+    vsnprintf(fmtmsg,sizeof(fmtmsg),msg,ap);
+    va_end(ap);
+
     fprintf(stderr, "------------------------------------------------");
     fprintf(stderr, "!!! Software Failure. Press left mouse button to continue");
-    fprintf(stderr, "Guru Meditation: %s #%s:%d",msg,file,line);
+    fprintf(stderr, "Guru Meditation: %s #%s:%d",fmtmsg,file,line);
     abort();
 }
